@@ -2,12 +2,13 @@
 # choose CPU or GPU below
 dev = GPU()
 ########################################################################
-path_to_run = "./" ;
+path_to_run = "./" 
+restart_filename ="CI.mat"
 restart_flag = false
 ########################################################################
 # forcing parameters
 ########################################################################
-forcing_type = 20 ;
+forcing_type = 20 
 ### forcing_type :   10 => White noise forcing 
 ###                  20 => Kolmogorov forcing
 # will vary with forcing_type

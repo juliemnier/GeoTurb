@@ -243,10 +243,7 @@ module Equation
         ldiv!(∂xψ, grid.rfftplan, @. im * grid.kr * Fψn)
         ldiv!(ζ, grid.rfftplan, @. grid.Krsq * Fψn)
 
-        #@. ζ *= params.resol^(2) # TEST
-        #@. ∂yψ *= params.resol^(2) # TEST
-        #@. ∂xψ *= params.resol^(2) # TEST
-
+    
         uζ = @. ∂yψ * ζ         
         vζ = @. -∂xψ * ζ 
         
@@ -365,7 +362,7 @@ module Equation
         vars.Fψ0 = deepcopy(vars.Fψ) # copy solution at current timestep
         # for passive tracer (optional)
         Fτ0 = params.add_tracer ? deepcopy(vars.Fτ) : nothing # option of advecting a passive tracer, initialization 
-        params.add_tracer ? (@devzeros Dev Complex{T} (grid.nkr, grid.nl) FNLτf) : nothing # initialize ponderated non-linear term # TEST
+        params.add_tracer ? (@devzeros Dev Complex{T} (grid.nkr, grid.nl) FNLτf) : nothing # initialize ponderated non-linear term 
     
         # weights and coefficients for classical explicit rk4 method
         order = [0.5 0.5 1]
@@ -470,69 +467,6 @@ module Equation
 
 
 
-    """
-        etdrk4 timestepper
-       
-    etdrk4 timestepper, following S. MASET AND M. ZENNARO (2008) 3a) 3b)
-
-    """
-
-    
-
-    # function etdrk4_timestepper!(vars :: Vars , params :: Params, Lψ :: AbstractArray, 
-    #     Lτ :: Union{Nothing, AbstractArray}, grid, dt :: AbstractFloat)
-    #     """
-    #     See above for function description
-    #     """
-    #     vars.Fψ0 = deepcopy(vars.Fψ) # copy solution at current timestep
-    #     Fτ0 = deepcopy(vars.Fτ)
-
-    #     expL = @. exp(Lψ*dt/2)
-    #     A = @. (1/Lψ) * (expL - 1)
-        
-        
-     
-    #     FNL0, FNLτ0 = compute_NL(vars, vars.Fψ, vars.Fτ , params , grid)
-    #     if params.add_tracer
-    #         @. FNLτ0 +=  im * grid.kr * vars.Fψ
-    #     end
-
-    #     fu = @. (1/(Lψ^3 * dt^2)) *(-4 - dt*Lψ + expL^2 * (4 - 3*Lψ*dt + (dt*Lψ).^2))
-       
-       
-    #     vars.Fψ = @. expL^2 * vars.Fψ0 + fu*FNL0 
-    #     if params.add_tracer
-    #         vars.Fτ = @. expL^2 * Fτ0 + fu*FNLτ0
-    #     end
-    #     fu = nothing
-
-    #     an = @. expL * vars.Fψ0 + A * FNL0
-    #     anτ = nothing
-    #     FNLa, FNLaτ = compute_NL(vars, an , anτ , params , grid)
-    #     # add mean gradient for τ
-
-    #     bn = @. expL * vars.Fψ0 + A * FNLa;
-    #     if params.tracer 
-    #         bnτ = @. expL * Fτ0 + A * FNLaτ
-
-    #     end
-
-    #     FNLb = FNL(bn,Fforcage,kx,ky,resol,oneoverk2);
-    #     clear bn
-    #     fab = (1./(Lψ.^3*dt^2)).*(2 + dt*FL + expL.^2.*(-2 + FL*dt));
-    #     Fpsi = Fpsi + 2*fab.*(FNLa +FNLb);
-    
-    #     cn = expL.*an + A.*(2*FNLb-FNL0);
-        
-    #     fc = (1./(FL.^3*dt^2)).*(-4 - 3*dt*FL - (dt*FL).^2 + expL.^2.*(4-FL*dt));
-    #     Fpsi = Fpsi +  fc.*FNL(cn,Fforcage,kx,ky,resol,oneoverk2);
-        
-
-    #     return
-    # end
-
-
-
     """ step_forward!(vars :: Vars, params :: Params, L :: AbstractArray, Lτ :: Union{Nothing, AbstractArray}, timestepper :: string, grid, dt)
 
     stepforwards the equation using the chosen timestepper 
@@ -552,22 +486,23 @@ module Equation
             rk4_explicit_timestepper!(vars, params, L, Lτ, grid, dt)
         end
         if params.timestepper == 30
-            etdrk4_timestepper!(vars, params, L, Lτ, grid, dt)
+            println("ETDRK4 source in writing, choose other timestepper")
+            exit()            
         end
         # CFL criteria for next timestep 
-        KE, dt = update_timestep(vars, params, grid, dt)
+        KE, dt = CFL_update_timestep(vars, params, grid, dt)
         # effectively update timestep
         vars.time = vars.time + dt
         return vars, KE, dt
     end
 
-    """ update_timestep(vars :: Vars, params :: Params, dt)
+    """ CFL_update_timestep(vars :: Vars, params :: Params, dt)
 
     returns adaptative timestep with CFL condition from current solution
 
     """
 
-    function update_timestep(vars :: Vars, params :: Params, grid, dt0)
+    function CFL_update_timestep(vars :: Vars, params :: Params, grid, dt0)
         """ Returns new timestep from CFL conditions and KE 
         """
         # Computing horizontal kinetic energy for CFL condition

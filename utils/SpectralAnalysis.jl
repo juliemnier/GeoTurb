@@ -72,9 +72,7 @@ module SpectralAnalysis
                 end
             end
         end
-        #if savefile
-        #    matwrite("spectrum_" * lpad(string(timestep), 6, '0') * ".mat", Dict("lkmoy" => lkmoy, "rSpecsum" => rSpecsum))
-        #end
+        
         # renormalization ? CHECK
         rSpecsum /= resol^4
         return rSpecsum, lkmoy

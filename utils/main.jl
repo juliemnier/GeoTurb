@@ -24,7 +24,7 @@ end
 #μ, κ = friction_type == 10 ? (nothing, κ) : (μ, nothing) 
 params = Equation.Params(resol, ν, nν, friction_type, μ, κ, η, forcing_type, kf, dkf, ε, dealiasing, mask, add_tracer, CFL, timestepper);
 # Initial conditions
-Fψ, Fτ = Equation.initialize_field(grid, params, IC_type, noise_amplitude, restart_flag, path_to_run)
+Fψ, Fτ = Equation.initialize_field(grid, params, IC_type, noise_amplitude, restart_flag, path_to_run, restart_filename)
 # Main variables
 vars = Equation.Vars(Fψ, nothing, nothing, Fτ, nothing, t0);
 # Forcing initialization

@@ -1,7 +1,7 @@
 using FourierFlows
 using BenchmarkTools
 using CUDA
-include("./src/Equation_2DNS.jl")
+include("../src/Equation_2DNS.jl")
 using .Equation
 
 # load parameters
