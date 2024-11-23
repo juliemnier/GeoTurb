@@ -15,8 +15,7 @@ module Equation
     using MAT
     using Plots: savefig
 
-    # TODO: decider que faire de inversion_map. comment écrire le bilan QG ? L1 et L0 à initialiser avant d'appeler
-    # Params (immutable)
+    
     """
     Largely inspired from GeophysicalFlows.jl for coding style/structure
     and function definition (but probably uglier)
@@ -545,7 +544,7 @@ module Equation
 
     function run_simulation!(vars :: Vars, params :: Params, inversion_map :: Inversion, L10 :: AbstractArray,
         Lb0 :: AbstractArray , Lb1 :: AbstractArray , L01 :: Union{Nothing, AbstractArray}, 
-        Lτ :: Union{Nothing, AbstractArray}, grid, Nfield :: Int, NsaveEc :: Int,
+        Lτ :: Union{Nothing, AbstractArray}, grid, Nfield :: Int, 
          Nstep :: Int, NsaveFlowfield :: Int, Nfig :: Int, NSpectrum :: Int, dt, path_to_run)
         
         if params.friction_type == 10
@@ -557,25 +556,11 @@ module Equation
         for ii in 1:Nstep
             vars, KE, dt = step_forward!(vars, params, L10, Lb0, Lb1, L01, Lτ, grid, dt) 
             counterEc+=1
-            if counterEc == NsaveEc
-                counterEc = 0
-                SSD, LSD, inject, D, LHS, RHS = energy_budget_QGEady(vars, params, inversion_map, grid, dt)
-                # Open the file for writing or appending
-                if round(Int, ii / NsaveEc) == 1
-                    open("energy_bal.txt", "w") do file
-                        write(file, string(vars.time, " ", KE, " ", dt, " ",inject, " ", SSD, " ", LSD, " ", LHS, " ",RHS, " ",D, "\n"))
-                    end
-                else
-                    open("energy_bal.txt", "a") do file
-                        write(file, string(vars.time, " ", KE, " ", dt, " ",inject, " ", SSD, " ", LSD, " ", LHS, " ",RHS, " ",D, "\n"))
-                    end
-                end
-            end
-        
+                    
             if mod(ii, Nfig) == 0
-                save_vort_flowfield_png_2DNS(vars, grid, vars.time, :RdBu_5, path_to_run)
+                save_vort_flowfield_png_QGEady(vars, grid, vars.time, :RdBu_5, path_to_run)
                 if params.add_tracer
-                    save_tau_flowfield_png_2DNS(vars, grid, vars.time, :RdBu_5, path_to_run)
+                    save_tau_flowfield_png_QGEady(vars, grid, vars.time, :RdBu_5, path_to_run)
                 end
             end
         
@@ -635,25 +620,48 @@ module Equation
     function save_vort_flowfield_png_QGEady(vars :: Vars, grid, timestep, choice_colormap, path_to_run)
         """ Save snapshot of vorticity at chosen timestep
         """
+        inversion_ψb!(vars.Fb0, vars.Fb1, params)
+
         Δψ = deepcopy(grid.Ksq)
-        FΔψ = @. grid.Krsq * vars.Fψ
-        ldiv!(Δψ, grid.rfftplan, FΔψ)
+        FΔψ0 = @. - grid.Krsq * vars.Fψ0
+        ldiv!(Δψ, grid.rfftplan, FΔψ0)
+
+                
         fig = Figure()
-        ax = Axis(fig[1, 1], 
-            title = L"$\Delta \psi$", 
+        ax1 = Axis(fig[1, 1], 
+            title = L"$\Delta \psi_0$", 
             titlesize = 40,
             xlabel = L"$X$", 
             ylabel = L"$Y$",
             aspect = DataAspect()
         )
         
-        hm = heatmap!(ax, 
+        hm = heatmap!(ax1, 
             grid.x, grid.y, Array(Δψ), 
             colormap = choice_colormap,                   
             colorrange = extrema(Array(Δψ))
             )
         Colorbar(fig[1, 2], hm, ticklabelsize = 18)
+
+        # use 0-var as scratch, again
+        FΔψ1 = @. - grid.Krsq * vars.Fψ1
+        ldiv!(Δψ, grid.rfftplan, FΔψ1)
+
+        ax2 = Axis(fig[1, 2], 
+            title = L"$\Delta \psi_1$", 
+            titlesize = 40,
+            xlabel = L"$X$", 
+            ylabel = L"$Y$",
+            aspect = DataAspect()
+        )
         
+        hm = heatmap!(ax2, 
+            grid.x, grid.y, Array(Δψ), 
+            colormap = choice_colormap,                   
+            colorrange = extrema(Array(Δψ))
+            )
+        Colorbar(fig[1, 2], hm, ticklabelsize = 18)
+
         save(path_to_run * "Snapshots/Snapshot_vort_" * lpad(string(timestep), 6, '0') * ".png", fig)
         return
     end
@@ -681,52 +689,6 @@ module Equation
         
         save(path_to_run * "Snapshots/Snapshot_tau_" * lpad(string(timestep), 6, '0') * ".png", fig)
         return
-    end
-
-    """ 
-        energy_budget_2DNS(vars :: Vars, params :: Params, grid ::TwoDGrid, dt :: Float64)
-    
-    Energy budget for 2DNS computed from vorticity equation, multiplied by ψ then averaged.
-    
-    """
-
-    function energy_budget_QGEady(vars :: Vars, params :: Params, inversion_map :: Inversion, grid ::TwoDGrid, dt :: Float64)
-        """ Computes and prints every Nstep timesteps the energy budget of the 2DNS 
-            vorticity equation for two types of friction
-        """
-        k2 = Array(grid.Krsq)
-        Em  = real(inner_prod(Array(vars.Fψ),  Array(grid.Krsq.*vars.Fψ), k2, 0))        
-        Em0 = real(inner_prod(Array(vars.Fψ0),  Array(grid.Krsq.*vars.Fψ0), k2, 0)) 
-
-        SSD = params.ν  * energy(Array(vars.Fψ), k2, 5)
-        if params.friction_type == 10
-            LSD = params.κ*energy(Array(vars.Fψ),k2,1)
-        elseif params.friction_type == 20
-            LSD = -real(inner_prod(Array(vars.Fψ),Array(vars.Ffrictionquad), k2, 0)) 
-        end
-        if params.forcing_type == 10
-            inject = real(inner_prod(Array((vars.Fψ + vars.Fψ0)/2), Array(vars.Fh), k2, 0))
-        elseif  params.forcing_type == 20
-            inject = real(inner_prod(Array(vars.Fψ),  Array(vars.Fh), k2, 0))
-        end
-        D = nothing
-        if params.add_tracer
-            D = real(inner_prod(Array(imm * grid.kr .* vars.Fψ), Array(vars.Fτ), k2, 0))
-        end
-        LHS = (Em - Em0)/dt/2 # 1/2 (∇ψ)^2 
-        RHS = inject - SSD - LSD
-
-        
-        # Flux=-params.Ro*real(inner_prod(Fpsi0,1i*kx.*gamma1.*Fpsi1));
-        #  #Friction=real(kappa_lambda2*sum_prod_symm(k2.*Fpsi0,Fpsi0));
-        # Friction=-mu_lambda2*real(sum_prod_symm(Fpsi0,1i*kx.*FGradPsi0dxPsi0(1:resol/2+1,:)+1i*ky.*FGradPsi0dyPsi0(1:resol/2+1,:)));
-        # Hyperviscosity=nu*real(sum_prod_symm(k2.^4.*(gamma0-gamma1)/2.*(Fpsi0+Fpsi1),Fpsi0+Fpsi1)+...
-        # sum_prod_symm(k2.^4.*(gamma0+gamma1)/2.*(Fpsi0-Fpsi1),Fpsi0-Fpsi1));
-        # RHS=Flux-Friction-Hyperviscosity;
-        # dt_Em=(Em-Em_0)/dt_0;
-
-
-        return SSD, LSD, inject, D, LHS, RHS
     end
 
     

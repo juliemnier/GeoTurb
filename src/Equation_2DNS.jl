@@ -75,8 +75,6 @@ module Equation
         Fh :: Union{Nothing, T}
         "Timestep"
         time :: Float64
-        "Substep"
-        substep :: Union{Nothing, Float64}
     end
 
 
@@ -266,7 +264,7 @@ module Equation
         
         # add forcing
         if params.forcing_type == 10
-            @. FNL += vars.Fh/sqrt(vars.substep)
+            @. FNL += vars.Fh
         else
             @. FNL += vars.Fh
         end
@@ -369,7 +367,7 @@ module Equation
         pond = [1/6 1/3 1/3 1/6]
         
         for irk4 in range(1,length(order))
-            vars.substep = order[irk4]
+            
             FNL, FNLτ = compute_NL(vars, vars.Fψ, vars.Fτ, params, grid)
             @. FNLf += pond[irk4] * FNL # ponderate
            
@@ -442,7 +440,7 @@ module Equation
 
         order = [0 0.5 0.5 1]
         pond = [1/6 1/3 1/3 1/6]
-        vars.substep = 1
+        
         for ii in range(1,4)
             current_slope, current_slope_τ = compute_RHS(vars, params, grid, vars.Fψ0 .+ order[ii]*dt*current_slope, Fτ0 .+ order[ii]*dt*current_slope_τ, Lψ, Lτ)
             
