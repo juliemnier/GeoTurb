@@ -85,8 +85,8 @@ module Equation
 
     """
 
-    function initialize_field(grid, params :: Params, IC_type :: Int, noise_amplitude, restart_flag :: Bool;
-         path_to_run::Union{String, Nothing} = nothing, filename::Union{String, Nothing} = nothing)
+    function initialize_field(grid, params :: Params, IC_type :: Int, noise_amplitude, restart_flag :: Bool,
+         path_to_run::Union{String, Nothing}, filename::Union{String, Nothing})
         # initialize streamfunction
         
         if restart_flag

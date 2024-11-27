@@ -36,4 +36,4 @@ mkdir ${WHERE_TO}/Fields
 cp ${GT_ROOT}/utils/main.jl ${WHERE_TO}
 cp ${GT_ROOT}/utils/namelist.jl ${WHERE_TO}
 cd ${WHERE_TO}
-nohup .....
+fi
