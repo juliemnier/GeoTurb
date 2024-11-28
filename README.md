@@ -1,6 +1,5 @@
 # GeoTurb GPU-based Pseudo-Spectral Solver for 2D Geophysical Flows
 
-## TODO: fix passive tracer advection in 2DNS 
 
 This repository contains the **first version** of a pseudo-spectral solver for 2D geophysical flows, optimized to run on GPUs. The solver uses **[FourierFlows.jl](https://github.com/FourierFlows/FourierFlows.jl)** for grid management and FFT operations, and is inspired by **[GeophysicalFlows.jl](https://github.com/FourierFlows/GeophysicalFlows.jl)**—though slightly uglier in its current state, and probably less memory-efficient as it is. Provides more flexibility and features related to my research interests.
 
