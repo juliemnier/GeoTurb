@@ -288,7 +288,7 @@ module Equation
     
     """
 
-    function compute_NLτ( Fτn :: AbstractArray, grid, ∂yψ :: AbstractArray, ∂xψ :: AbstractArray)    
+    function compute_NLτ( Fτn :: AbstractArray, grid, ∂xψ :: AbstractArray, ∂yψ :: AbstractArray)    
         
         Dev = typeof(grid.device)
         T = eltype(grid)
@@ -306,8 +306,7 @@ module Equation
         mul!(Fvτ, grid.rfftplan, τv) # \hat{v*τ}
         τv = nothing
         FNLτ = @. - im * grid.kr * Fuτ - im * grid.l * Fvτ
- 
-
+        
         return FNLτ
     end
 
@@ -326,14 +325,15 @@ module Equation
         
         # add non-linear term
         FNL, FNLτ = compute_NL(vars, Fψn, Fτn, params, grid)
-        slope_Fψ += FNL
+        @. slope_Fψ += FNL
     
         
-        slope_Fτ = nothing
         if params.add_tracer
             # add linear term and mean gradient of 1 (-v in RHS of τ equation)
             slope_Fτ = @. Lτ * Fτn + im * grid.kr * Fψn
             @. slope_Fτ += FNLτ 
+        else
+            slope_Fτ = nothing
         end
         return slope_Fψ, slope_Fτ
     end
@@ -379,8 +379,6 @@ module Equation
             
             if params.add_tracer
                 # advecting a passive tracer with mean gradient
-
-                #@. vars.Fτ = (Fτ0+dt*order[irk4]*FNLτ)/(1 - dt*order[irk4]*Lτ)
                 @. vars.Fτ = (Fτ0+dt*order[irk4]*(FNLτ + im * grid.kr * vars.Fψ))/(1-dt*order[irk4]*Lτ) 
                 # weighted average
                 @. FNLτf += pond[irk4] * FNLτ
@@ -407,7 +405,6 @@ module Equation
             #then update with total estimation
             @. FNLτf += pond[end] * FNLτ
             @. vars.Fτ = (Fτ0 + dt*(FNLτf + im * grid.kr * vars.Fψ)) / ( 1 - dt*Lτ )
-           
             # dealiase
             params.deal ? (@. vars.Fτ *= params.mask) : nothing
         end
@@ -420,7 +417,6 @@ module Equation
         not well suited for stiff ODE but good benchmark
     """
     
-
     function rk4_explicit_timestepper!(vars :: Vars , params :: Params, Lψ :: AbstractArray, 
         Lτ :: Union{Nothing, AbstractArray}, grid, dt :: AbstractFloat)
         """
