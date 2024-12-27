@@ -19,6 +19,9 @@ module Equation
     """
     Largely inspired from GeophysicalFlows.jl for coding style/structure
     and function definition (but probably uglier)
+    
+    Convention for streamfunction is the standard one in geophysics (u,v) = (-∂yψ, ∂xψ)
+
 
     """
 
@@ -237,10 +240,7 @@ module Equation
             Lb0 = @.  im *params.Ro*grid.kr/2 + params.L0.* (im*grid.kr*params.Ro) -params.ν * grid.Krsq^params.nν
             Lb1 = @. -im*params.Ro*grid.kr/2 - params.L0 * (im*grid.kr*params.Ro) -params.ν * grid.Krsq^params.nν
 
-            CUDA.@allowscalar L10[1, 1] = 0
-            CUDA.@allowscalar Lb1[1, 1] = 0
-            CUDA.@allowscalar Lb0[1, 1] = 0
-
+    
         end
         
 
@@ -288,8 +288,8 @@ module Equation
         ldiv!(∂xψ, grid.rfftplan, @. im * grid.kr * Fψ1n)
         ldiv!(b, grid.rfftplan, Fb1n)
 
-        ub = @. ∂yψ * b        
-        vb = @. -∂xψ * b 
+        ub = @. -∂yψ * b        
+        vb = @. ∂xψ * b 
 
         mul!(Fub, grid.rfftplan, ub) # \hat{u1*b1}
         mul!(Fvb, grid.rfftplan, vb) # \hat{v1*b1}
@@ -302,8 +302,8 @@ module Equation
         ldiv!(∂xψ, grid.rfftplan, @. im * grid.kr * Fψ0n)
         ldiv!(b, grid.rfftplan, Fb0n)
         
-        @. ub = ∂yψ * b        
-        @. vb = -∂xψ * b 
+        @. ub = -∂yψ * b        
+        @. vb = ∂xψ * b 
     
         mul!(Fub, grid.rfftplan, ub) # \hat{u0*b0}
         mul!(Fvb, grid.rfftplan, vb) # \hat{v0*b0}
@@ -349,7 +349,7 @@ module Equation
     
     """
 
-    function compute_NLτ( Fτn :: AbstractArray, grid, ∂yψ :: AbstractArray, ∂xψ :: AbstractArray)    
+    function compute_NLτ( Fτn :: AbstractArray, grid, ∂xψ :: AbstractArray, ∂yψ :: AbstractArray)    
         # TO DO!!
         Dev = typeof(grid.device)
         T = eltype(grid)
@@ -359,15 +359,15 @@ module Equation
 
         ldiv!(τ, grid.rfftplan, deepcopy(Fτn))
         # add advection for passive tracer
-        τu = @. ∂yψ * τ       # in physical space first  
-        τv = @. -∂xψ  * τ     # in physical space first  
+        τu = @. -∂yψ * τ       # in physical space first  
+        τv = @. ∂xψ  * τ     # in physical space first  
 
         mul!(Fuτ, grid.rfftplan, τu) # \hat{u*τ}
         mul!(Fvτ, grid.rfftplan, τv) # \hat{v*τ}
 
         FNLτ = @. - im * grid.kr * Fuτ - im * grid.l * Fvτ
         # add mean gradient, here handled explicitely
-        @. FNLτ += im * grid.kr * vars.Fψ
+        @. FNLτ -= im * grid.kr * vars.Fψ
 
         return FNLτ
     end
@@ -397,8 +397,8 @@ module Equation
         @devzeros Dev Complex{T} (grid.nkr, grid.nl) FNLf0 # initialize ponderated non-linear term
         @devzeros Dev Complex{T} (grid.nkr, grid.nl) FNLf1 # initialize ponderated non-linear term
         
-        vars.Fb0 = deepcopy(vars.Fb0) # copy solution at current timestep
-        vars.Fb1 = deepcopy(vars.Fb1) # copy solution at current timestep
+        vars.Fb0_0 = deepcopy(vars.Fb0) # copy solution at current timestep
+        vars.Fb1_0 = deepcopy(vars.Fb1) # copy solution at current timestep
         # for passive tracer (optional)
         Fτ0 = params.add_tracer ? deepcopy(vars.Fτ) : nothing # option of advecting a passive tracer, initialization 
         params.add_tracer ? (@devzeros Dev Complex{T} (grid.nkr, grid.nl) FNLτf) : nothing # initialize ponderated non-linear term # TEST
@@ -416,10 +416,10 @@ module Equation
             # compute slope estimation for intermediate timestep
             if params.friction_type == 20
                 # otherwise the term L01 must be computed
-                @. vars.Fb0 =((1 - dt*order[irk4]*Lb1) * (vars.Fb0 + dt*order[irk4]*FNL0) 
-                    - dt*order[irk4]*L10*(vars.Fb1 + dt*order[irk4]*FNL1))/(1 - dt*order[irk4]*(Lb1+Lb0) + (dt*order[irk4])^2*(Lb0*Lb1 + L10^2))
-                @. vars.Fb1 =(dt*order[irk4]*L10 * (vars.Fb0 + dt*order[irk4]*FNL0) 
-                    + (1 - dt*order[irk4]*Lb0)*(vars.Fb1 + dt*order[irk4]*FNL1))/(1 - dt*order[irk4]*(Lb1+Lb0) + (dt*order[irk4])^2*(Lb0*Lb1 + L10^2))
+                @. vars.Fb0 =((1 - dt*order[irk4]*Lb1) * (vars.Fb0_0 + dt*order[irk4]*FNL0) 
+                    - dt*order[irk4]*L10*(vars.Fb1_0 + dt*order[irk4]*FNL1))/(1 - dt*order[irk4]*(Lb1+Lb0) + (dt*order[irk4])^2*(Lb0*Lb1 + L10^2))
+                @. vars.Fb1 =(dt*order[irk4]*L10 * (vars.Fb0_0 + dt*order[irk4]*FNL0) 
+                    + (1 - dt*order[irk4]*Lb0)*(vars.Fb1_0 + dt*order[irk4]*FNL1))/(1 - dt*order[irk4]*(Lb1+Lb0) + (dt*order[irk4])^2*(Lb0*Lb1 + L10^2))
             end
             
             # dealiase intermediate solution
@@ -445,15 +445,16 @@ module Equation
         
         # update with ponderated estimation of the slope
            
-        @. vars.Fb0 =((1 - dt*Lb1) * (vars.Fb0 + dt*FNLf0) 
-                    - dt*L10*(vars.Fb1 + dt*FNLf1))/(1 - dt*(Lb1+Lb0) + dt^2*(Lb0*Lb1 + L10^2))
-        @. vars.Fb1 =(dt*L10 * (vars.Fb0 + dt*FNLf0) 
-            + (1 - dt*Lb0)*(vars.Fb1 + dt*FNLf1))/(1 - dt*(Lb1+Lb0) + dt^2*(Lb0*Lb1 + L10^2))
+        @. vars.Fb0 =((1 - dt*Lb1) * (vars.Fb0_0 + dt*FNLf0) 
+                    - dt*L10*(vars.Fb1_0 + dt*FNLf1))/(1 - dt*(Lb1+Lb0) + dt^2*(Lb0*Lb1 + L10^2))
+        @. vars.Fb1 =(dt*L10 * (vars.Fb0_0 + dt*FNLf0) 
+            + (1 - dt*Lb0)*(vars.Fb1_0 + dt*FNLf1))/(1 - dt*(Lb1+Lb0) + dt^2*(Lb0*Lb1 + L10^2))
 
 
         # dealiase 
         params.deal ? (@. vars.Fb0 *= params.mask) : nothing
         params.deal ? (@. vars.Fb1 *= params.mask) : nothing
+        inversion_ψb!(vars.Fb0, vars.Fb1, params)
 
         if params.add_tracer
             #then update with total estimation
@@ -485,11 +486,11 @@ module Equation
             rk4_imex_timestepper!(vars, params, L10, Lb0, Lb1, L01, Lτ, grid, dt) 
         end
         if params.timestepper == 20
-            println("source has yet to be written")
+            println("Explicit rk4 not available : source has yet to be written")
             exit()
         end
         if params.timestepper == 30
-            println("source has yet to be written")
+            println("ETDrk4 not available : source has yet to be written")
             exit()
         end
         # CFL criteria for next timestep 
@@ -510,8 +511,6 @@ module Equation
         """ Returns new timestep from CFL conditions and KE 
         """
         # Computing horizontal kinetic energy for CFL condition
-
-        inversion_ψb!(vars.Fb0, vars.Fb1, params)
 
         # TODO: clean below
         ∂yψ = deepcopy(grid.Ksq) # use as scratch variable, for right dim
@@ -548,14 +547,35 @@ module Equation
          Nstep :: Int, NsaveFlowfield :: Int, Nfig :: Int, NSpectrum :: Int, dt, path_to_run)
         
         if params.friction_type == 10
-            println("source has yet to be written")
+            println("Linear friction not available : source has yet to be written")
             exit()
         end
+
+        if params.add_wn
+            println("White-noise forcing not available: source has yet to be written")
+            exit()
+        end
+
         counterEc = 0
         countSp = 0
         for ii in 1:Nstep
             vars, KE, dt = step_forward!(vars, params, L10, Lb0, Lb1, L01, Lτ, grid, dt) 
             counterEc+=1
+            
+            if counterEc == NsaveEc
+                counterEc = 0
+                SSD, LSD, inject, D, LHS, RHS = energy_budget_QGEady(vars, params, grid, dt)
+                # Open the file for writing or appending
+                if round(Int, ii / NsaveEc) == 1
+                    open("energy_bal.txt", "w") do file
+                        write(file, string(vars.time, " ", KE, " ", dt, " ",inject, " ", SSD, " ", LSD, " ", LHS, " ",RHS, " ",D, "\n"))
+                    end
+                else
+                    open("energy_bal.txt", "a") do file
+                        write(file, string(vars.time, " ", KE, " ", dt, " ",inject, " ", SSD, " ", LSD, " ", LHS, " ",RHS, " ",D, "\n"))
+                    end
+                end
+            end
                     
             if mod(ii, Nfig) == 0
                 save_vort_flowfield_png_QGEady(vars, grid, vars.time, :RdBu_5, path_to_run)
@@ -584,7 +604,8 @@ module Equation
     function save_flowfield(vars :: Vars, Nfield :: Int, path_to_run)
         filename = path_to_run * "Fields/Flowfield_" * @sprintf("%03d", Nfield) * ".mat"
         matwrite(filename, Dict(
-            "Fpsi" => Array(vars.Fψ),
+            "Fb0" => Array(vars.Fb0),
+            "Fb1" => Array(vars.Fb1),
             "Ftau" => Array(vars.Fτ),
             "Nfield" => Nfield,
             "time" => vars.time
@@ -599,11 +620,16 @@ module Equation
     """
     function save_spectrum(vars :: Vars,  grid, countSp :: Int, path_to_run)
         
-        rSpecveloc,kmoy = radial_spectrum(Array(vars.Fψ), Array(grid.Krsq), Int(1))
+        Fψbt = @. - (vars.Fb0 - vars.Fb1) * grid.invKrsq 
+        Fψbc = @. vars.Fψ1 - vars.Fψ0
+        rSpecbt,kmoybt = radial_spectrum(Array(Fψbt), Array(grid.Krsq), Int(1))
+        rSpecbc,kmoybc = radial_spectrum(Array(Fψbc), Array(grid.Krsq), Int(1))
         filename = path_to_run * "Fields/spectrum_" * @sprintf("%03d", countSp) * ".mat"
         matwrite(filename, Dict(
-            "rSpecveloc" => Array(rSpecveloc),
-            "kmoy" => Array(kmoy),
+            "rSpecbt" => Array(rSpecbt),
+            "kmoybt" => Array(kmoybt),
+            "rSpecbc" => Array(rSpecbc),
+            "kmoybc" => Array(kmoybc),
             "time" => vars.time
         ))
         return
@@ -620,7 +646,6 @@ module Equation
     function save_vort_flowfield_png_QGEady(vars :: Vars, grid, timestep, choice_colormap, path_to_run)
         """ Save snapshot of vorticity at chosen timestep
         """
-        inversion_ψb!(vars.Fb0, vars.Fb1, params)
 
         Δψ = deepcopy(grid.Ksq)
         FΔψ0 = @. - grid.Krsq * vars.Fψ0
@@ -689,6 +714,32 @@ module Equation
         
         save(path_to_run * "Snapshots/Snapshot_tau_" * lpad(string(timestep), 6, '0') * ".png", fig)
         return
+    end
+
+    function energy_budget_QGEady(vars :: Vars, params :: Params, grid ::TwoDGrid, dt :: Float64)
+        """ Computes and prints every Nstep timesteps the energy budget of the QG
+            Eady energy equation 
+        """
+        k2 = Array(grid.Krsq)
+        Em  = real(inner_prod(Array(vars.Fψ),  Array(grid.Krsq.*vars.Fψ), k2, 0))        
+        Em0 = real(inner_prod(Array(vars.Fψ0),  Array(grid.Krsq.*vars.Fψ0), k2, 0)) 
+
+        SSD = params.ν  * energy(Array(vars.Fψ), k2, 5)
+    
+        if params.friction_type == 20
+            LSD = -real(inner_prod(Array(vars.Fψ),Array(vars.Ffrictionquad), k2, 0)) 
+        end
+        if params.add_wn
+            println("source has yet to be written")
+            exit()
+        end
+        D = nothing
+        if params.add_tracer
+            D = real(inner_prod(Array(1im * grid.kr .* vars.Fψ), Array(vars.Fτ), k2, 0))
+        end
+        LHS = (Em - Em0)/dt/2 # 1/2 (∇ψ)^2 
+        RHS = inject - SSD - LSD
+        return SSD, LSD, inject, D, LHS, RHS
     end
 
     
