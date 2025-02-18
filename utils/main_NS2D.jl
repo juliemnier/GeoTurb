@@ -1,11 +1,11 @@
 using FourierFlows
 using BenchmarkTools
 using CUDA
-include("../src/Equation_2DNS.jl")
+include("../../../../../src/Equation_2DNS.jl")
 using .Equation
 
 # load parameters
-include("namelist.jl") # not a module
+include("namelist_NS2D.jl") # not a module
 
 #@btime begin
 
@@ -24,9 +24,9 @@ end
 #μ, κ = friction_type == 10 ? (nothing, κ) : (μ, nothing) 
 params = Equation.Params(resol, ν, nν, friction_type, μ, κ, η, forcing_type, kf, dkf, ε, dealiasing, mask, add_tracer, CFL, timestepper);
 # Initial conditions
-Fψ, Fτ = Equation.initialize_field(grid, params, IC_type, noise_amplitude, restart_flag, path_to_run, restart_filename)
+Fψ, Fτ, Ffrictionquad, Fscratch, scratch = Equation.initialize_field(grid, params, IC_type, noise_amplitude, restart_flag, path_to_run, restart_filename)
 # Main variables
-vars = Equation.Vars(Fψ, nothing, nothing, Fτ, nothing, t0);
+vars = Equation.Vars(Fψ, Fscratch, scratch, Ffrictionquad, Fτ, nothing, t0);
 # Forcing initialization
 Equation.calcF!(vars, params, grid, dt);
 # Linear operators initialization
@@ -35,6 +35,6 @@ Lψ, Lτ = Equation.compute_L(params, grid)
 #############################################################################
 # Main loop 
 
-Equation.run_simulation!(vars, params, Lψ, Lτ, grid, Nfield, NsaveEc, Nstep, NsaveFlowfield, Nfig, Nspectrum, dt, path_to_run)
+@btime Equation.run_simulation!(vars, params, Lψ, Lτ, grid, Nfield, NsaveEc, Nstep, NsaveFlowfield, Nfig, Nspectrum, dt, path_to_run)
    
 

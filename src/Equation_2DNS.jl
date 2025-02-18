@@ -1,3 +1,4 @@
+__precompile__()
 module Equation
 
     export Params, Vars, calcF!, compute_NL
@@ -65,8 +66,10 @@ module Equation
     mutable struct Vars{T <: AbstractArray} 
         "Fourier transform of streamfunction"
         Fψ :: Union{Nothing, T}
-        "Fourier transform of streamfunction, previous timestep"
-        Fψ0 :: Union{Nothing, T}
+        "Fourier transform of streamfunction, previous timestep or scratch variable"
+        Fscratch :: Union{Nothing, T}
+        "Streamfunction, real space scratch variable"
+        scratch :: Union{Nothing, AbstractArray}
         "Friction term in -Δ⟂ψ equation"
         Ffrictionquad :: Union{Nothing, T}
         "Fourier transform of passive tracer τ"
@@ -85,8 +88,7 @@ module Equation
 
     """
 
-    function initialize_field(grid, params :: Params, IC_type :: Int, noise_amplitude, restart_flag :: Bool,
-         path_to_run::Union{String, Nothing}, filename::Union{String, Nothing})
+    function initialize_field(grid, params :: Params, IC_type :: Int, noise_amplitude, restart_flag :: Bool, path_to_run::Union{String, Nothing}, filename::Union{String, Nothing})
         # initialize streamfunction
         
         if restart_flag
@@ -117,10 +119,10 @@ module Equation
                 Dev = typeof(grid.device)
                 @devzeros Dev Complex{T} (size(grid.Krsq)) Fψ
                 @devzeros Dev T (size(grid.rfftplan)) ψ
-                @CUDA.allowscalar Fψ[2, 3] += noise_amplitude * (2*CUDA.rand(T) - 1 + 1im*(2*CUDA.rand(T) - 1))
-                @CUDA.allowscalar Fψ[3, 2] += noise_amplitude * (2*CUDA.rand(T)- 1 + 1im*(2*CUDA.rand(T) - 1))
-                @CUDA.allowscalar Fψ[2, 2] += noise_amplitude * (2*CUDA.rand(T) - 1 + 1im*(2*CUDA.rand(T) - 1))
-                @CUDA.allowscalar Fψ[1, 3] += noise_amplitude * (2*CUDA.rand(T) - 1 + 1im*(2*CUDA.rand(T) - 1))
+                @CUDA.allowscalar Fψ[2, 3] += noise_amplitude * (2*CUDA.rand(T) - 1 + 1im*(2*CUDA.rand(T) - 1))*params.resol^2
+                @CUDA.allowscalar Fψ[3, 2] += noise_amplitude * (2*CUDA.rand(T)- 1 + 1im*(2*CUDA.rand(T) - 1))*params.resol^2
+                @CUDA.allowscalar Fψ[2, 2] += noise_amplitude * (2*CUDA.rand(T) - 1 + 1im*(2*CUDA.rand(T) - 1))*params.resol^2
+                @CUDA.allowscalar Fψ[1, 3] += noise_amplitude * (2*CUDA.rand(T) - 1 + 1im*(2*CUDA.rand(T) - 1))*params.resol^2
                 # ensure that we got a real initial condition
                 ldiv!(ψ, grid.rfftplan, Fψ)
                 mul!(Fψ, grid.rfftplan, ψ) 
@@ -133,8 +135,18 @@ module Equation
                 end
             end
         end
-        
-        return Fψ, Fτ
+        if params.friction_type == 20
+            Ffrictionquad = deepcopy(Fψ)
+        else
+            Ffrictionquad = nothing
+        end
+
+        Dev = typeof(grid.device)
+        T = eltype(grid)
+        @devzeros Dev T (size(grid.rfftplan)) scratch
+        Fscratch = deepcopy(Fψ)
+
+        return Fψ, Fτ, Ffrictionquad, Fscratch, scratch
     end 
 
 
@@ -227,9 +239,10 @@ module Equation
         T = eltype(grid)
         # initialize physical space arrays
         # initialization could be optimized, bit overkill
+        # a minima on garde ces deux arrays qui servent au moins 3 fois chacuns
         @devzeros Dev T (size(grid.rfftplan)) ∂yψ
         @devzeros Dev T (size(grid.rfftplan)) ∂xψ
-        @devzeros Dev T (size(grid.rfftplan)) ζ
+       # @devzeros Dev T (size(grid.rfftplan)) ζ
         
         # initialize fft arrays
         #@devzeros Dev Complex{T} (grid.nkr, grid.nl) FNL
@@ -239,41 +252,36 @@ module Equation
         # advection 
         ldiv!(∂yψ, grid.rfftplan, @. im * grid.l * Fψn)
         ldiv!(∂xψ, grid.rfftplan, @. im * grid.kr * Fψn)
-        ldiv!(ζ, grid.rfftplan, @. grid.Krsq * Fψn)
 
-    
-        uζ = @. ∂yψ * ζ         
-        vζ = @. -∂xψ * ζ 
-        
-    
-        mul!(Fuζ, grid.rfftplan, uζ) # \hat{u*ζ}
-        mul!(Fvζ, grid.rfftplan, vζ) # \hat{v*ζ}
-        
-        FNL = @. - im * grid.kr * Fuζ - im * grid.l * Fvζ
+        ldiv!(vars.scratch, grid.rfftplan, @. grid.Krsq * Fψn) # ζ ifft stored in scratch
+
+       
+        mul!(vars.Fscratch, grid.rfftplan,  @. ∂yψ * vars.scratch) # \hat{u*ζ}
+        FNL = @. - im * grid.kr * vars.Fscratch # initialize nonlinear term with fft of -dx(uζ) 
+        mul!(vars.Fscratch, grid.rfftplan,  @. -∂xψ * vars.scratch ) # \hat{v*ζ}
+        @. FNL += - im * grid.l * vars.Fscratch # fft of -dy(vζ) added to nonlinear term
 
         # add quadratic drag 
         if params.friction_type == 20
-            @devzeros Dev Complex{T} (grid.nkr, grid.nl) F∇ψ∂xψ 
-            @devzeros Dev Complex{T} (grid.nkr, grid.nl) F∇ψ∂yψ 
-            mul!(F∇ψ∂xψ, grid.rfftplan, @. (sqrt( ∂xψ^2 + ∂yψ^2 ) * ∂xψ))
-            mul!(F∇ψ∂yψ, grid.rfftplan, @. (sqrt( ∂xψ^2 + ∂yψ^2 ) * ∂yψ))  
-    
-            vars.Ffrictionquad = @. params.μ*(im * grid.kr * F∇ψ∂xψ + im * grid.l * F∇ψ∂yψ)
+            # again, erase Fscratch
+            mul!(vars.Fscratch, grid.rfftplan, @. (sqrt( ∂xψ^2 + ∂yψ^2 ) * ∂xψ))
+            @. vars.Ffrictionquad = params.μ* im * grid.kr * vars.Fscratch # re-assign for next estimation at substep, add μ*dx(F∇ψ∂xψ)
+             # again, erase Fscratch
+            mul!(vars.Fscratch, grid.rfftplan, @. (sqrt( ∂xψ^2 + ∂yψ^2 ) * ∂yψ))  
+            @. vars.Ffrictionquad += @. params.μ* im * grid.l * vars.Fscratch # add  μ*dy(F∇ψ∂yψ)
             @. FNL += vars.Ffrictionquad
         end
         
         # add forcing
-        if params.forcing_type == 10
-            @. FNL += vars.Fh
-        else
-            @. FNL += vars.Fh
-        end
+       
+        @. FNL += vars.Fh
+      
         # switch to ψ equation
         @. FNL *=grid.invKrsq  # we just computed the non-linear term for the vorticity equation : switch to ψ equation
     
         # add passive tracer advection
         if params.add_tracer
-            FNLτ = compute_NLτ(Fτn, grid, ∂xψ, ∂yψ)
+            FNLτ = compute_NLτ(vars, Fτn, grid, ∂xψ, ∂yψ)
         else
             FNLτ = nothing # to avoid definition issue when add_tracer = False
         end
@@ -288,25 +296,17 @@ module Equation
     
     """
 
-    function compute_NLτ( Fτn :: AbstractArray, grid, ∂xψ :: AbstractArray, ∂yψ :: AbstractArray)    
+    function compute_NLτ(vars :: Vars, Fτn :: AbstractArray, grid, ∂xψ :: AbstractArray, ∂yψ :: AbstractArray)    
         
-        Dev = typeof(grid.device)
-        T = eltype(grid)
-        @devzeros Dev T (size(grid.rfftplan)) τ
-        @devzeros Dev Complex{T} (grid.nkr, grid.nl) Fuτ
-        @devzeros Dev Complex{T} (grid.nkr, grid.nl) Fvτ
-
-        ldiv!(τ, grid.rfftplan, deepcopy(Fτn))
-        # add advection for passive tracer
-        τu = @. ∂yψ * τ       # in physical space first  
-        τv = @. -∂xψ  * τ     # in physical space first  
-
-        mul!(Fuτ, grid.rfftplan, τu) # \hat{u*τ}
-        τu = nothing
-        mul!(Fvτ, grid.rfftplan, τv) # \hat{v*τ}
-        τv = nothing
-        FNLτ = @. - im * grid.kr * Fuτ - im * grid.l * Fvτ
+        ldiv!(vars.scratch, grid.rfftplan, deepcopy(Fτn)) # ifft τ stored in scratch
+        mul!(vars.Fscratch, grid.rfftplan, @. ∂yψ * vars.scratch) # \hat{u*τ}
+        FNLτ = @. - im * grid.kr * vars.Fscratch # add - dx(u*τ) to RHS
         
+        mul!(vars.Fscratch, grid.rfftplan, @. -∂xψ  * vars.scratch ) # \hat{v*τ}
+        
+        @. FNLτ += @. - im * grid.l * vars.Fscratch # add - dy(v*τ) to RHS
+ 
+
         return FNLτ
     end
 
@@ -326,8 +326,7 @@ module Equation
         # add non-linear term
         FNL, FNLτ = compute_NL(vars, Fψn, Fτn, params, grid)
         @. slope_Fψ += FNL
-    
-        
+            
         if params.add_tracer
             # add linear term and mean gradient of 1 (-v in RHS of τ equation)
             slope_Fτ = @. Lτ * Fτn + im * grid.kr * Fψn
@@ -352,12 +351,13 @@ module Equation
         """
         See above for function description
         """
+        
         Dev = typeof(grid.device)
         T = eltype(grid)
 
         # Initialize relevant arrays for imex rk4
         @devzeros Dev Complex{T} (grid.nkr, grid.nl) FNLf # initialize ponderated non-linear term
-        vars.Fψ0 = deepcopy(vars.Fψ) # copy solution at current timestep
+        Fψ0 = deepcopy(vars.Fψ) # copy solution at current timestep
         # for passive tracer (optional)
         Fτ0 = params.add_tracer ? deepcopy(vars.Fτ) : nothing # option of advecting a passive tracer, initialization 
         params.add_tracer ? (@devzeros Dev Complex{T} (grid.nkr, grid.nl) FNLτf) : nothing # initialize ponderated non-linear term 
@@ -372,13 +372,15 @@ module Equation
             @. FNLf += pond[irk4] * FNL # ponderate
            
             # compute slope estimation for intermediate timestep
-            @. vars.Fψ = (vars.Fψ0 + dt*order[irk4]*FNL)/(1 - dt*order[irk4]*Lψ)
+            @. vars.Fψ = (Fψ0 + dt*order[irk4]*FNL)/(1 - dt*order[irk4]*Lψ)
 
             # dealiase intermediate solution
             params.deal ? (@. vars.Fψ *= params.mask) : nothing
             
             if params.add_tracer
                 # advecting a passive tracer with mean gradient
+
+                #@. vars.Fτ = (Fτ0+dt*order[irk4]*FNLτ)/(1 - dt*order[irk4]*Lτ)
                 @. vars.Fτ = (Fτ0+dt*order[irk4]*(FNLτ + im * grid.kr * vars.Fψ))/(1-dt*order[irk4]*Lτ) 
                 # weighted average
                 @. FNLτf += pond[irk4] * FNLτ
@@ -396,7 +398,7 @@ module Equation
         @. FNLf +=  pond[end] * FNL;
         FNL = nothing
         # update with ponderated estimation of the slope
-        @. vars.Fψ = ( vars.Fψ0 +  dt * FNLf) / (1 - dt*Lψ) 
+        @. vars.Fψ = (Fψ0 +  dt * FNLf) / (1 - dt*Lψ) 
         
         # dealiase
         params.deal ? (@. vars.Fψ *= params.mask) : nothing
@@ -405,6 +407,7 @@ module Equation
             #then update with total estimation
             @. FNLτf += pond[end] * FNLτ
             @. vars.Fτ = (Fτ0 + dt*(FNLτf + im * grid.kr * vars.Fψ)) / ( 1 - dt*Lτ )
+           
             # dealiase
             params.deal ? (@. vars.Fτ *= params.mask) : nothing
         end
@@ -417,13 +420,22 @@ module Equation
         not well suited for stiff ODE but good benchmark
     """
     
+
     function rk4_explicit_timestepper!(vars :: Vars , params :: Params, Lψ :: AbstractArray, 
         Lτ :: Union{Nothing, AbstractArray}, grid, dt :: AbstractFloat)
         """
         See above for function description
         """
         vars.Fψ0 = deepcopy(vars.Fψ) # copy solution at current timestep
-        Fτ0 = params.add_tracer ? deepcopy(vars.Fτ) : nothing 
+        if params.add_tracer
+            Fτ0 = deepcopy(vars.Fτ)
+            @devzeros Dev Complex{T} (grid.nkr, grid.nl) final_slope_τ
+            @devzeros Dev Complex{T} (grid.nkr, grid.nl) current_slope_τ
+        else 
+            Fτ0 = nothing
+            final_slope_τ = nothing
+            current_slope_τ = nothing
+        end
 
         Dev = typeof(grid.device)
         T = eltype(grid)
@@ -431,9 +443,6 @@ module Equation
         @devzeros Dev Complex{T} (grid.nkr, grid.nl) final_slope # initialize ponderated slope
         @devzeros Dev Complex{T} (grid.nkr, grid.nl) current_slope # initialize ponderated slope
        
-        params.add_tracer ? (@devzeros Dev Complex{T} (grid.nkr, grid.nl) final_slope_τ) : nothing # initialize ponderated non-linear term
-        params.add_tracer ? (@devzeros Dev Complex{T} (grid.nkr, grid.nl) current_slope_τ) : nothing # initialize ponderated non-linear term
-
         order = [0 0.5 0.5 1]
         pond = [1/6 1/3 1/3 1/6]
         
@@ -468,6 +477,7 @@ module Equation
     """
 
     function step_forward!(vars :: Vars, params :: Params, L :: AbstractArray, Lτ :: Union{Nothing, AbstractArray}, grid, dt)
+        start = time_ns()
         # update the forcing if white-noise-in-time
         if params.forcing_type == 10
             vars.Fh = calcF!(vars, params, grid, dt)
@@ -483,11 +493,13 @@ module Equation
             println("ETDRK4 source in writing, choose other timestepper")
             exit()            
         end
+        stop = time_ns()
+        elapsed_time = (stop- start)/1.0e9
         # CFL criteria for next timestep 
         KE, dt = CFL_update_timestep(vars, params, grid, dt)
         # effectively update timestep
         vars.time = vars.time + dt
-        return vars, KE, dt
+        return vars, KE, dt, elapsed_time
     end
 
     """ CFL_update_timestep(vars :: Vars, params :: Params, dt)
@@ -500,13 +512,10 @@ module Equation
         """ Returns new timestep from CFL conditions and KE 
         """
         # Computing horizontal kinetic energy for CFL condition
-        F∂yψ = @. im * grid.l * vars.Fψ
-        F∂xψ = @. im * grid.kr * vars.Fψ
-        ∂yψ = deepcopy(grid.Ksq) # use as scratch variable, for right dim
-        ∂xψ = deepcopy(grid.Ksq) # same
-        ldiv!(∂yψ, grid.rfftplan, F∂yψ)
-        ldiv!(∂xψ, grid.rfftplan, F∂xψ)
-        Ecloc= @. ( ∂xψ^2 + ∂yψ^2 )
+        ldiv!(vars.scratch, grid.rfftplan, @. im * grid.l * vars.Fψ) # ifft of u=dyψ stored in scratch
+        Ecloc= @. vars.scratch^2 # add u^2 to KE 
+        ldiv!(vars.scratch, grid.rfftplan, @. im * grid.kr * vars.Fψ)# ifft of v=-dxψ stored in scratch
+        @. Ecloc += vars.scratch^2 # add v^2 to KE 
         dt = minimum([dt0, params.CFL * 2 * π / params.resol / sqrt(maximum(Array(Ecloc)))])
         # updating time step
         KE = sum(Ecloc) / (params.resol * params.resol)
@@ -521,19 +530,19 @@ module Equation
         counterEc = 0
         countSp = 0
         for ii in 1:Nstep
-            vars, KE, dt = step_forward!(vars, params, Lψ, Lτ, grid, dt)
+            vars, KE, dt, elapsed_time = step_forward!(vars, params, Lψ, Lτ, grid, dt)
             counterEc+=1
             if counterEc == NsaveEc
                 counterEc = 0
-                SSD, LSD, inject, D, LHS, RHS = energy_budget_2DNS(vars, params, grid, dt)
+                SSD, LSD, inject, D, tau2 = energy_budget_2DNS(vars, params, grid, dt)
                 # Open the file for writing or appending
                 if round(Int, ii / NsaveEc) == 1
                     open("energy_bal.txt", "w") do file
-                        write(file, string(vars.time, " ", KE, " ", dt, " ",inject, " ", SSD, " ", LSD, " ", LHS, " ",RHS, " ",D, "\n"))
+                        write(file, string(vars.time, " ", KE, " ", dt, " ",inject, " ", SSD, " ", LSD, " ",tau2, " ",D, " ",elapsed_time, "\n"))
                     end
                 else
                     open("energy_bal.txt", "a") do file
-                        write(file, string(vars.time, " ", KE, " ", dt, " ",inject, " ", SSD, " ", LSD, " ", LHS, " ",RHS, " ",D, "\n"))
+                        write(file, string(vars.time, " ", KE, " ", dt, " ",inject, " ", SSD, " ", LSD, " ", tau2, " ",D, " ",elapsed_time, "\n"))
                     end
                 end
             end
@@ -661,8 +670,8 @@ module Equation
             vorticity equation for two types of friction
         """
         k2 = Array(grid.Krsq)
-        Em  = real(inner_prod(Array(vars.Fψ),  Array(grid.Krsq.*vars.Fψ), k2, 0))        
-        Em0 = real(inner_prod(Array(vars.Fψ0),  Array(grid.Krsq.*vars.Fψ0), k2, 0)) 
+        #Em  = real(inner_prod(Array(vars.Fψ),  Array(grid.Krsq.*vars.Fψ), k2, 0))        
+        #Em0 = real(inner_prod(Array(vars.Fψ0),  Array(grid.Krsq.*vars.Fψ0), k2, 0)) 
 
         SSD = params.ν  * energy(Array(vars.Fψ), k2, 5)
         if params.friction_type == 10
@@ -678,10 +687,14 @@ module Equation
         D = nothing
         if params.add_tracer
             D = real(inner_prod(Array(1im * grid.kr .* vars.Fψ), Array(vars.Fτ), k2, 0))
+            tau2 = real(inner_prod(Array(vars.Fτ), Array(vars.Fτ), k2, 0))
+
         end
-        LHS = (Em - Em0)/dt/2 # 1/2 (∇ψ)^2 
-        RHS = inject - SSD - LSD
-        return SSD, LSD, inject, D, LHS, RHS
+       
+       # LHS = (Em - Em0)/dt/2 # 1/2 (∇ψ)^2 
+       # RHS = inject - SSD - LSD
+       
+        return SSD, LSD, inject, D, tau2
     end
 
     
