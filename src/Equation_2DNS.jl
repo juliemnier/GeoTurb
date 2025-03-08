@@ -99,13 +99,13 @@ module Equation
                 # load CI from .mat file
                 CI_data = matread(file_path) 
                 if haskey(CI_data, "Fpsi")
-                    Fψ = CuArray(CI_data["Fpsi"])
+                    Fψ = CuArray(CI_data["Fpsi"])*params.resol^2
                 else
                     println("Warning: Variable '$Fpsi' not found in '$file_name'.")
                 end
                 if params.add_tracer 
                     if haskey(CI_data, "Ftau")
-                        Fτ = CuArray(CI_data["Ftau"])
+                        Fτ = CuArray(CI_data["Ftau"])*params.resol^2
                     else
                         println("Warning: Variable '$Ftau' not found in '$file_name'.")
                     end
@@ -282,10 +282,13 @@ module Equation
         # add passive tracer advection
         if params.add_tracer
             FNLτ = compute_NLτ(vars, Fτn, grid, ∂xψ, ∂yψ)
+            Fτn = nothing
         else
             FNLτ = nothing # to avoid definition issue when add_tracer = False
         end
-
+        ∂xψ = nothing
+        ∂yψ = nothing
+        Fψn = nothing
         return FNL, FNLτ
     end
 
