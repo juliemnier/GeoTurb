@@ -352,7 +352,8 @@ module Equation
     function rk4_imex_timestepper!(vars :: Vars , params :: Params, Lψ :: AbstractArray,
                             Lτ :: Union{Nothing, AbstractArray}, grid, dt :: AbstractFloat)
         """
-        See above for function description
+        See above for function description. Ad-hoc. would require an exponential formulation
+        to reach more that 2nd order precision. fails to capture rapid exponential decay if |Lψ|<<1
         """
         
         Dev = typeof(grid.device)
@@ -418,6 +419,67 @@ module Equation
 
     end
 
+
+    """ IMEX rk2 timestepper
+
+    """
+
+    function etdrk2_timestepper!(vars :: Vars , params :: Params, Lψ :: AbstractArray,
+        Lτ :: Union{Nothing, AbstractArray}, grid, dt :: AbstractFloat)
+        """
+        Memory efficient implementation of etdrk2
+        """
+
+        # Initialize relevant arrays 
+        Fψ0 = deepcopy(vars.Fψ) # copy solution at current timestep
+        # for passive tracer (optional)
+        Fτ0 = params.add_tracer ? deepcopy(vars.Fτ) : nothing # option of advecting a passive tracer, initialization 
+        
+        # first step  
+        FNL, FNLτ = compute_NL(vars, vars.Fψ, vars.Fτ, params, grid)   
+        @. vars.Fscratch = exp(Lψ*dt/2)
+        @. vars.Fψ = @. vars.Fscratch.*Fψ0 + (vars.Fscratch - 1)/Lψ * FNL #intermediate
+        params.deal ? (@. vars.Fψ *= params.mask) : nothing
+        if params.add_tracer
+            @. vars.Fscratch = exp(Lτ*dt/2)
+            @. vars.Fτ = @. vars.Fscratch.*Fτ0 + (vars.Fscratch - 1)/Lτ * FNLτ #intermediate
+            params.deal ? (@. vars.Fτ *= params.mask) : nothing
+        end
+
+        # second step, use Fψ0 as scratch 
+        @. Fψ0 =  @. exp(Lψ*dt) *Fψ0 + (exp(Lψ*dt) - 1)/Lψ * FNL - 2*(exp(Lψ*dt) - 1 - Lψ*dt)/(Lψ.^2*dt) * FNL
+        if params.add_tracer
+            # again, use Fτ0 as scratch
+            @. Fτ0 =  @. exp(Lτ*dt) *Fτ0 + (exp(Lτ*dt) - 1)/Lτ* FNLτ - 2*(exp(Lτ*dt) - 1 - Lτ*dt)/(Lτ.^2*dt) * FNLτ
+        end
+        FNL, FNLτ = compute_NL(vars, vars.Fψ, vars.Fτ, params, grid) # uses Fscratch, that's why we used Fψ0 on the previous line
+        # re-assign Fψ
+        @. vars.Fψ = @. Fψ0 + 2*(exp(Lψ*dt) - 1 - Lψ*dt)/(Lψ.^2*dt) * FNL
+        if params.add_tracer
+            #re-assign Fτ
+            @. vars.Fτ = @. Fτ0 + 2*(exp(Lτ*dt) - 1 - Lτ*dt)/(Lτ.^2*dt) * FNLτ
+        end
+   
+        Fψ0 = nothing
+        Fτ0 = nothing
+
+    return
+    end
+
+    """ IMEX ETDRK4 
+
+    """
+
+
+    function etdrk4_timestepper!(vars :: Vars , params :: Params, Lψ :: AbstractArray,
+        Lτ :: Union{Nothing, AbstractArray}, grid, dt :: AbstractFloat)
+    """
+    See above for function description
+    """
+   
+
+    return
+    end
     """
         explicit rk4 timestepper
         not well suited for stiff ODE but good benchmark
@@ -487,15 +549,19 @@ module Equation
         end
         # update solution
         if params.timestepper == 10
-            rk4_imex_timestepper!(vars, params, L, Lτ, grid, dt)
+            etdrk2_timestepper!(vars, params, L, Lτ, grid, dt)
         end
         if params.timestepper == 20
             rk4_explicit_timestepper!(vars, params, L, Lτ, grid, dt)
         end
         if params.timestepper == 30
             println("ETDRK4 source in writing, choose other timestepper")
-            exit()            
+            exit()
         end
+        if params.timestepper == 40
+            rk4_imex_timestepper!(vars, params, L, Lτ, grid, dt)
+        end
+
         stop = time_ns()
         elapsed_time = (stop- start)/1.0e9
         # CFL criteria for next timestep 
