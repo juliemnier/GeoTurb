@@ -38,9 +38,11 @@ t0 = 0.
 ########################################################################
 # fourth-order timesteppers
 timestepper = 10
-### timestepper :  10 => etdrk2
+### timestepper :  10 => rk2 exponential formulation
 ###                20 => explicit_rk4
-###                30 => etdrk4
+###                30 => rk4 exponential formulation
+###                40 => imex rk4
+###                50 => etdrk2
 ########################################################################
 # large-scale dissipation
 friction_type = 10 ;

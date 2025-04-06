@@ -427,59 +427,208 @@ module Equation
     function etdrk2_timestepper!(vars :: Vars , params :: Params, Lψ :: AbstractArray,
         Lτ :: Union{Nothing, AbstractArray}, grid, dt :: AbstractFloat)
         """
-        Memory efficient implementation of etdrk2
+        Memory efficient implementation of etdrk2 -> still have to correctly handle calculation
+        of ϕ_i to ensure stability
         """
-
-        # Initialize relevant arrays 
         Fψ0 = deepcopy(vars.Fψ) # copy solution at current timestep
         # for passive tracer (optional)
-        Fτ0 = params.add_tracer ? deepcopy(vars.Fτ) : nothing # option of advecting a passive tracer, initialization 
-        
-        # first step  
-        FNL, FNLτ = compute_NL(vars, vars.Fψ, vars.Fτ, params, grid)   
-        @. vars.Fscratch = exp(Lψ*dt/2)
-        @. vars.Fψ = @. vars.Fscratch.*Fψ0 + (vars.Fscratch - 1)/Lψ * FNL #intermediate
+        Fτ0 = params.add_tracer ? deepcopy(vars.Fτ) : nothing # option of advecting a passive tracer, initialization
+        Fscratchτ = params.add_tracer ? deepcopy(vars.Fτ) : nothing
+        # first step
+        ###########################################################
+        FNL, FNLτ = compute_NL(vars, vars.Fψ, vars.Fτ, params, grid)
+
+        @. vars.Fscratch =  ((exp(Lψ*dt/2) - 1)/(Lψ))   # phi1*dt
+        vars.Fscratch .= ifelse.(isnan.(vars.Fscratch), dt/2, vars.Fscratch)
+       
+        @. vars.Fψ =   exp(Lψ*dt/2) *Fψ0 + vars.Fscratch * FNL #intermediate
         params.deal ? (@. vars.Fψ *= params.mask) : nothing
+
         if params.add_tracer
-            @. vars.Fscratch = exp(Lτ*dt/2)
-            @. vars.Fτ = @. vars.Fscratch.*Fτ0 + (vars.Fscratch - 1)/Lτ * FNLτ #intermediate
+            @. Fscratchτ =  ((exp(Lτ*dt/2) - 1)/(Lτ)) # phi1*dt
+            Fscratchτ  .= ifelse.(isnan.(Fscratchτ), dt/2, Fscratchτ)
+            @. vars.Fτ =  exp(Lτ*dt/2)*Fτ0 + Fscratchτ * FNLτ #intermediate
             params.deal ? (@. vars.Fτ *= params.mask) : nothing
         end
 
-        # second step, use Fψ0 as scratch 
-        @. Fψ0 =  @. exp(Lψ*dt) *Fψ0 + (exp(Lψ*dt) - 1)/Lψ * FNL - 2*(exp(Lψ*dt) - 1 - Lψ*dt)/(Lψ.^2*dt) * FNL
+         ###########################################################
+        # second step, use Fψ0 as scratch # to modify for improved memory handling
+        @. vars.Fscratch = ((exp(Lψ*dt) - 1)/(Lψ))      # phi1*dt
+        vars.Fscratch .= ifelse.(isnan.(vars.Fscratch), dt, vars.Fscratch)
+        # ou ici le calcul des residus
+        @. vars.Fscratch *= FNL
+        @. vars.Fscratch  +=  (exp(Lψ*dt) * Fψ0)
+        copyto!(Fψ0, FNL)
+     
         if params.add_tracer
-            # again, use Fτ0 as scratch
-            @. Fτ0 =  @. exp(Lτ*dt) *Fτ0 + (exp(Lτ*dt) - 1)/Lτ* FNLτ - 2*(exp(Lτ*dt) - 1 - Lτ*dt)/(Lτ.^2*dt) * FNLτ
+            @. Fscratchτ = @.  ((exp(Lτ*dt) - 1)/(Lτ)) # phi1
+            Fscratchτ  .= ifelse.(isnan.(Fscratchτ), dt, Fscratchτ)
+            @. Fscratchτ *= FNLτ
+            @. Fscratchτ  +=  (exp(Lτ*dt) * Fτ0)
+            copyto!(Fτ0, FNLτ)
         end
+
         FNL, FNLτ = compute_NL(vars, vars.Fψ, vars.Fτ, params, grid) # uses Fscratch, that's why we used Fψ0 on the previous line
-        # re-assign Fψ
-        @. vars.Fψ = @. Fψ0 + 2*(exp(Lψ*dt) - 1 - Lψ*dt)/(Lψ.^2*dt) * FNL
+        copyto!(vars.Fψ, vars.Fscratch)
+        if params.add_tracer; copyto!(vars.Fτ, Fscratchτ) ; end
+
+        @. vars.Fscratch  = (2*((exp(Lψ*dt) - 1 - Lψ*dt)/(Lψ^2*dt))) # phi2*dt
+        vars.Fscratch .= ifelse.(isnan.(vars.Fscratch), dt, vars.Fscratch)
+
+        @. vars.Fψ += vars.Fscratch*(FNL - Fψ0)  # final
+        params.deal ? (@. vars.Fψ *= params.mask) : nothing
+
         if params.add_tracer
-            #re-assign Fτ
-            @. vars.Fτ = @. Fτ0 + 2*(exp(Lτ*dt) - 1 - Lτ*dt)/(Lτ.^2*dt) * FNLτ
+            #@. Fscratchτ  =  (2*((exp(Lτ*dt) - 1 - Lτ*dt)/(Lτ^2*dt))) # phi2
+            @. Fscratchτ  =  (ifelse(abs(Lτ) < 1e-16, dt,  2*((exp(Lτ*dt) - 1 - Lτ *dt)/(Lτ^2*dt))))
+            if isnan(CUDA.@allowscalar Fscratchτ[1, 1]); CUDA.@allowscalar Fscratchτ[1, 1] = dt/2; end
+            @. vars.Fτ +=  Fscratchτ*(FNLτ - Fτ0)  #final
+            params.deal ? (@. vars.Fτ *= params.mask) : nothing
+            FNLτ = nothing
+            Fscratchτ = nothing
+            Fτ0 = nothing
         end
-   
+
+        #end
+      
         Fψ0 = nothing
-        Fτ0 = nothing
+        FNL = nothing
 
     return
     end
 
-    """ IMEX ETDRK4 
+    """ RK4 exponential formulation 
 
     """
-
 
     function etdrk4_timestepper!(vars :: Vars , params :: Params, Lψ :: AbstractArray,
         Lτ :: Union{Nothing, AbstractArray}, grid, dt :: AbstractFloat)
     """
-    See above for function description
+    rk4 with exact integration of non-linear terms (ALY-KHAN KASSAM† AND LLOYD N. TREFETHEN 2005)
+        we want to optimize RAM usage, not nb of computations
     """
-   
+        
+        @devzeros Dev Complex{T} (grid.nkr, grid.nl) Fcurrent # initialize ponderated slope
+    
+         # Initialize relevant arrays 
+         Fψ0 = deepcopy(vars.Fψ) # copy solution at current timestep
+         # for passive tracer (optional)
+         Fτ0 = params.add_tracer ? deepcopy(vars.Fτ) : nothing # option of advecting a passive tracer, initialization 
+         if params.add_tracer
+            @devzeros Dev Complex{T} (grid.nkr, grid.nl) Fcurrentτ
+         else 
+            Fcurrentτ = nothing
+         end
+         
+         # first step  
+         FNL, FNLτ = compute_NL(vars, vars.Fψ, vars.Fτ, params, grid)   
+         @. Fcurrent = exp(Lψ*dt/2) * (Fψ0 + dt/2 * FNL) # current estimate
+         vars.Fψ = @. exp(Lψ*dt) * (Fψ0 + dt/6 * FNL) #final estimate, reassign vars.Fψ here
+
+         params.deal ? (@. Fcurrent *= params.mask) : nothing
+         
+         if params.add_tracer
+            @. Fcurrentτ = exp(Lτ*dt/2) * (Fτ0 + dt/2 * FNLτ) # current estimate
+            vars.Fτ = @. exp(Lτ*dt) * (Fτ0 + dt/6 * FNLτ) # final estimate, reassign here
+            params.deal ? (@. Fcurrentτ *= params.mask) : nothing
+         end
+         # second step 
+         FNL, FNLτ = compute_NL(vars, Fcurrent, Fcurrentτ, params, grid)  
+         @. Fcurrent = exp(Lψ*dt/2) * Fψ0 + dt/2 * FNL # current estimate
+         @. vars.Fψ += exp(Lψ*dt/2) * FNL * dt/3 #final estimate
+         params.deal ? (@. Fcurrent *= params.mask) : nothing
+         FNL = nothing
+         if params.add_tracer
+            @. Fcurrentτ = exp(Lτ*dt/2) * Fτ0 + dt/2 * FNLτ # current estimate
+            @. vars.Fτ += exp(Lτ*dt/2) *  FNLτ * dt/3 # final estimate
+            params.deal ? (@. Fcurrentτ *= params.mask) : nothing
+            FNLτ = nothing
+         end
+         # third step 
+         FNL, FNLτ = compute_NL(vars, Fcurrent, Fcurrentτ, params, grid)  
+         @. Fcurrent = exp(Lψ*dt) * Fψ0 + exp(Lψ*dt/2) * dt * FNL # current estimate
+         @. vars.Fψ += exp(Lψ*dt/2) * FNL * dt/3 #final estimate
+         params.deal ? (@. Fcurrent *= params.mask) : nothing
+         if params.add_tracer
+            @. Fcurrentτ = exp(Lτ*dt) * Fτ0 + exp(Lτ*dt/2) * dt * FNLτ # current estimate
+            @. vars.Fτ += exp(Lτ*dt/2) *  FNLτ * dt/3 # final estimate
+            params.deal ? (@. Fcurrentτ *= params.mask) : nothing
+            FNLτ = nothing
+         end
+         # last step 
+         FNL = nothing
+         FNL, FNLτ = compute_NL(vars, Fcurrent, Fcurrentτ, params, grid)  
+         @. vars.Fψ += FNL * dt/6 #final estimate
+         params.deal ? (@. Fcurrent *= params.mask) : nothing
+        # final dealiasing
+        params.deal ? (@. vars.Fψ *= params.mask) : nothing
+         if params.add_tracer
+            @. vars.Fτ +=  FNLτ * dt/6 # final estimate
+            params.deal ? (@. Fcurrentτ *= params.mask) : nothing
+            # final dealiasing
+            params.deal ? (@. vars.Fτ *= params.mask) : nothing
+            FNLτ = nothing
+            Fτ0 = nothing
+            Fcurrentτ = nothing
+         end      
+        FNL = nothing
+        Fψ0 =nothing
+        Fcurrent = nothing
 
     return
     end
+
+    """ RK2 with exact integration of the linear terms
+
+    """
+    function rk2_timestepper!(vars :: Vars , params :: Params, Lψ :: AbstractArray,
+        Lτ :: Union{Nothing, AbstractArray}, grid, dt :: AbstractFloat)
+        """
+            rk2 timestepper with exact integration of the linear terms
+            Following valadao et al. 2025
+
+        """
+        Fψ0 = deepcopy(vars.Fψ) # copy solution at current timestep
+        # for passive tracer (optional)
+        Fτ0 = params.add_tracer ? deepcopy(vars.Fτ) : nothing # option of advecting a passive tracer, initialization
+
+        FNL, FNLτ = compute_NL(vars, vars.Fψ, vars.Fτ, params, grid)
+        # first step
+        @. vars.Fψ = exp(Lψ*dt/2)*(Fψ0 + (dt/2)*FNL)
+
+        #@. vars.Fψ = (Fψ0 + (dt/2)*FNL)/(1 - dt*Lψ/2)
+        FNL = nothing
+        # dealiase
+        params.deal ? (@. vars.Fψ *= params.mask) : nothing
+
+        if params.add_tracer
+            #then update with total estimation
+            @. vars.Fτ = exp(Lτ*dt/2)*(Fτ0 + (dt/2)*FNLτ)
+            #@. vars.Fτ = (Fτ0 + (dt/2)*(FNLτ)) / ( 1 - dt*Lτ/2)
+            FNLτ = nothing
+            # dealiase
+            params.deal ? (@. vars.Fτ *= params.mask) : nothing
+        end
+        # second step
+        FNL, FNLτ = compute_NL(vars, vars.Fψ, vars.Fτ, params, grid)
+        @. vars.Fψ =  exp(Lψ*dt) * Fψ0 + exp(Lψ*dt/2)*dt*FNL
+        # dealiase
+        params.deal ? (@. vars.Fψ *= params.mask) : nothing
+        FNL = nothing
+        if params.add_tracer
+            #then update with total estimation
+            @. vars.Fτ = exp(Lτ*dt) * Fτ0 + exp(Lτ*dt/2)*dt*FNLτ
+            FNLτ = nothing
+            # dealiase
+            params.deal ? (@. vars.Fτ *= params.mask) : nothing
+            Fτ0 = nothing
+        end
+        Fψ0 = nothing
+    return
+    end
+
+
+
     """
         explicit rk4 timestepper
         not well suited for stiff ODE but good benchmark
@@ -549,17 +698,22 @@ module Equation
         end
         # update solution
         if params.timestepper == 10
-            etdrk2_timestepper!(vars, params, L, Lτ, grid, dt)
+            rk2_timestepper!(vars, params, L, Lτ, grid, dt)
         end
         if params.timestepper == 20
             rk4_explicit_timestepper!(vars, params, L, Lτ, grid, dt)
         end
         if params.timestepper == 30
-            println("ETDRK4 source in writing, choose other timestepper")
+            etdrk4_timestepper!(vars, params, L, Lτ, grid, dt)
             exit()
         end
         if params.timestepper == 40
+            println("WARNING: IMEX formulation is second order. use rk2_timestepper or etdrk4 instead")
             rk4_imex_timestepper!(vars, params, L, Lτ, grid, dt)
+        end
+        if params.timestepper == 50
+            println("WARNING: not stable yet, only for very stiff equations")
+            etdrk2_timestepper!(vars, params, L, Lτ, grid, dt)
         end
 
         stop = time_ns()
