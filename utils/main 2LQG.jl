@@ -21,12 +21,17 @@ end
 
 #############################################################################
 # Run parameters
+
+
 params = Equation.Params(resol, ν, nν, λ, Ro, friction_type, μ, κ, add_wn, kf, dkf, ε, dealiasing, mask, CFL, timestepper, flag_2LQG);
 # Initial conditions
-Fψ, Fτ = Equation.initialize_field(grid, params, IC_type, noise_amplitude, restart_flag, path_to_run, restart_filename)
+Fψ , Fτ, Ffrictionquad, Fscratch, scratch = Equation.initialize_field(grid, params, IC_type, noise_amplitude, restart_flag, path_to_run, restart_filename)
+
+
+
 
 # Main variables
-vars = Equation.Vars(Fψ, Fτ, nothing, nothing, t0, nothing, nothing);
+vars = Equation.Vars(Fψ, Fτ, Fscratch, scratch, Ffrictionquad, nothing, t0);
 # Forcing initialization
 if params.add_wn
     Equation.calcF!(vars, params, grid, dt);
@@ -34,6 +39,6 @@ end
 
 #############################################################################
 # Main loop 
-
-Equation.run_simulation!(vars, params, grid, Nfield, Nstep, NsaveFlowfield, Nfig,  NsaveEc,  Nspectrum, dt, path_to_run)
+Lψψ, Lτψ, Lψτ = compute_L(params,grid)
+Equation.run_simulation!(vars, params, Lψψ, Lψτ, Lτψ,grid, Nfield, Nstep, NsaveFlowfield, Nfig,  NsaveEc,  Nspectrum, dt, path_to_run)
    

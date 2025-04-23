@@ -73,16 +73,16 @@ module Equation
         Fψ :: Union{Nothing, T}
         "Fourier transform of top buoyancy"
         Fτ :: Union{Nothing, T}
+        "Fourier transform of streamfunction, previous timestep or scratch variable"
+        Fscratch :: Union{Nothing, T}
+        "Streamfunction, real space scratch variable"
+        scratch :: Union{Nothing, AbstractArray}
         "Friction term in -Δ⟂ψ equation"
         Ffrictionquad :: Union{Nothing, T}
         "Substep"
-        substep :: Union{Nothing, Int64}
-        "Time"
-        Time :: Float64
-        "Fourier transform of bottom buoyancy at former timestep for budget"
-        Fψ0 :: Union{Nothing, T}
-        "Fourier transform of top buoyancy at former timestep for budget"
-        Fτ0 :: Union{Nothing, T}
+        substep :: Union{Nothing, Float64}
+        "Timestep"
+        time :: Float64
     end
 
     
@@ -105,8 +105,8 @@ module Equation
                     # load CI from .mat file
                     CI_data = matread(file_path) 
                     if haskey(CI_data, "Fψ") && haskey(CI_data, "Fτ")
-                        Fψ = CuArray(CI_data["Fpsi"])
-                        Fτ = CuArray(CI_data["Ftau"])
+                        Fψ = CuArray(CI_data["Fpsi"])*params.resol^2
+                        Fτ = CuArray(CI_data["Ftau"])*params.resol^2
                     else
                         println("Warning: Variable Fψ or Fτ not found in '$file_name'.")
                     end
@@ -121,10 +121,10 @@ module Equation
                     @devzeros Dev Complex{T} (size(grid.rfftplan)) ψ
                     @devzeros Dev Complex{T} (size(grid.rfftplan)) τ
 
-                    Fψ = Fψ  = noise_amplitude * ( 2*CUDA.rand(T, Int(params.resol/2)+1,params.resol) .- 1 .+ 1im*(2*CUDA.rand(T, Int(params.resol/2)+1,params.resol) .-1))
+                    Fψ  = noise_amplitude * ( 2*CUDA.rand(T, Int(params.resol/2)+1,params.resol) .- 1 .+ 1im*(2*CUDA.rand(T, Int(params.resol/2)+1,params.resol) .-1))*params.resol^2
                     @. Fψ = Fψ / grid.Krsq.^2
                     @CUDA.allowscalar Fψ[1,1] = 0
-                    Fτ = noise_amplitude *(2*CUDA.rand(T, Int(params.resol/2)+1,params.resol).-1+1im*(2*CUDA.rand(T, Int(params.resol/2)+1,params.resol).-1))
+                    Fτ = noise_amplitude *(2*CUDA.rand(T, Int(params.resol/2)+1,params.resol).-1+1im*(2*CUDA.rand(T, Int(params.resol/2)+1,params.resol).-1))*params.resol^2
                     @. Fτ = Fτ / grid.Krsq.^2
                     @CUDA.allowscalar Fτ[1,1] = 0
                     
@@ -137,8 +137,18 @@ module Equation
                 end
                 
             end
+            if params.friction_type == 20
+                Ffrictionquad = deepcopy(Fψ)
+            else
+                Ffrictionquad = nothing
+            end
+            Dev = typeof(grid.device)
+            T = eltype(grid)
+            @devzeros Dev T (size(grid.rfftplan)) scratch
+            Fscratch = deepcopy(Fψ)
+    
 
-            return Fψ , Fτ
+            return Fψ , Fτ, Ffrictionquad, Fscratch, scratch
         end 
 
 
@@ -191,27 +201,21 @@ module Equation
 
         if params.friction_type == 20
             
-            Lψψ = @. 1 + dt*params.ν * grid.Krsq^params.nν # here one should define L10 for linear drag
-    
-            Lτψ = @. dt * im * grid.kr * params.U * (grid.Krsq * Int(params.flag_2LQG) - 1/params.λ^2)
-            Lψτ = @.  dt * im * grid.kr * params.U * Int(params.flag_2LQG)
+            -grid.invKrsq
+        @. FNLτ *= - 1 ./(grid.Krsq + 1/params.λ^2)
+            Lψψ = @. -params.ν * grid.Krsq^params.nν   # here one should define L10 for linear drag
+            
+            Lτψ = @.  im * grid.kr * params.U * (grid.Krsq * Int(params.flag_2LQG) - 1/params.λ^2)/(grid.Krsq + 1/params.λ^2)
+            #Lτψ = @.  im * grid.kr * params.U * (grid.Krsq * Int(params.flag_2LQG) - 1/params.λ^2)
+            Lψτ =  @. im * grid.kr * params.U * Int(params.flag_2LQG)
         
         end
         
-        return Lψψ, Lτψ, Lψτ, @. 1/(Lψψ*Lψψ -  Lψτ*Lτψ)
+        #@. 1/(Lψψ*Lψψ -  Lψτ*Lτψ)
+        return Lψψ, Lτψ, Lψτ # Lττ = Lψψ
 
     end   
 
-    """ advection(∂xf :: AbstractArray, ∂yf :: AbstractArray, g :: AbstractArray)
-
-    Compute J(f, g)
-
-    """
-    function advection(∂xf :: AbstractArray, ∂yf :: AbstractArray, g :: AbstractArray)
-
-    end
-
-    # une fonction pour la friction quadratique ?
 
     """
         compute_NL(sol, grid)
@@ -229,84 +233,71 @@ module Equation
         # f is the advecting quantity (scratch between barotropic and baroclinic)
         @devzeros Dev T (size(grid.rfftplan)) ∂yf
         @devzeros Dev T (size(grid.rfftplan)) ∂xf
-        @devzeros Dev T (size(grid.rfftplan)) τ
+      
 
         @devzeros Dev T (size(grid.rfftplan)) Δψ
         @devzeros Dev T (size(grid.rfftplan)) Δτ
 
-        
         # initialize fft arrays
     
         @devzeros Dev Complex{T} (grid.nkr, grid.nl) FNLψ
         @devzeros Dev Complex{T} (grid.nkr, grid.nl) FNLτ
-        @devzeros Dev Complex{T} (grid.nkr, grid.nl) Fscratch
 
+        ldiv!(vars.scratch, grid.rfftplan, deepcopy(Fτn) )
         ldiv!(Δψ, grid.rfftplan, @. - grid.Krsq * Fψn )
         ldiv!(Δτ, grid.rfftplan, @. - grid.Krsq * Fτn )
-        ldiv!(τ, grid.rfftplan, Fτn )
+
+        #ldiv!(τ, grid.rfftplan, deepcopy(Fτn))
 
         ## First advecting with baroclinic velocity f = τ (∂xf.. used as scratch)
         
-        ldiv!(∂yf, grid.rfftplan, @. im * grid.l * Fτn)
-        ldiv!(∂xf, grid.rfftplan, @. im * grid.kr * Fτn)
+        ldiv!(∂yf, grid.rfftplan, @. im * grid.l * Fτn) #∂yτ
+        ldiv!(∂xf, grid.rfftplan, @. im * grid.kr * Fτn) #∂xτ
  
         # For ψ-equation (barotropic streamnfunction) J(τ, Δτ)
-        uflux = @. -∂yf * Δτ        
-        vflux = @.  ∂xf * Δτ 
  
-        mul!(Fscratch, grid.rfftplan, uflux) # \hat{u*Δτ} 
-        @. FNLψ +=   - im * grid.kr * Fscratch
-        mul!(Fscratch, grid.rfftplan, vflux) # \hat{v*Δτ}
-        @. FNLψ +=   - im * grid.kl * Fscratch
- 
+        mul!(vars.Fscratch, grid.rfftplan, @. -∂yf * Δτ) # \hat{u*Δτ} 
+        @. FNLψ +=   - im * grid.kr * vars.Fscratch
+        mul!(vars.Fscratch, grid.rfftplan, ∂xf * Δτ) # \hat{v*Δτ}
+        @. FNLψ +=   - im * grid.kl * vars.Fscratch
+
         # For τ-equation (baroclinic streamnfunction) J(τ, Δψ)
         if params.flag_2LQG
-            @. uflux = -∂yf * Δψ       
-            @. vflux =  ∂xf * Δψ
- 
-            mul!(Fscratch, grid.rfftplan, uflux) # \hat{u*Δψ} 
-            @. FNLτ +=   - im * grid.kr * Fscratch 
-            mul!(Fscratch, grid.rfftplan, vflux) # \hat{v*Δτ}
-            @. FNLτ +=   - im * grid.kl * Fscratch 
-
+            mul!(vars.Fscratch, grid.rfftplan, @. -∂yf * Δψ) # \hat{u*Δψ} 
+            @. FNLτ +=   - im * grid.kr * vars.Fscratch 
+            mul!(vars.Fscratch, grid.rfftplan, @. ∂xf * Δψ) # \hat{v*Δτ}
+            @. FNLτ +=   - im * grid.kl * vars.Fscratch 
             # saving baroclinic velocities for bottom drag term ψ2 = ψ - τ
             ∂xψ2 = - ∂xf
             ∂yψ2 = - ∂yf
-
         end   
-
 
         ## Now advecting with barotropic velocity f = ψ
         ldiv!(∂yf, grid.rfftplan, @. im * grid.l * Fψn)
         ldiv!(∂xf, grid.rfftplan, @. im * grid.kr * Fψn)
 
         # For ψ-equation (barotropic streamfunction) J(ψ, Δψ)
-        uflux = -∂yf * Δψ   # scratch   
-        vflux =  ∂xf * Δψ    # scratch  
 
-        mul!(Fscratch, grid.rfftplan, uflux) # \hat{u*Δψ} 
-        @. FNLψ +=   - im * grid.kr * Fscratch
-        mul!(Fscratch, grid.rfftplan, vflux) # \hat{v*Δψ}
-        @. FNLψ +=   - im * grid.kl * Fscratch
+        mul!(vars.Fscratch, grid.rfftplan, @. -∂yf * Δψ) # \hat{u*Δψ} 
+        @. FNLψ +=   - im * grid.kr * vars.Fscratch
+        mul!(vars.Fscratch, grid.rfftplan, @. ∂xf * Δψ) # \hat{v*Δψ}
+        @. FNLψ +=   - im * grid.kl * vars.Fscratch
 
         # For τ-equation (barotropic streamfunction) J(ψ, Δτ)
-        @. uflux = -∂yf * Δτ        # scratch  
-        @. vflux =  ∂xf * Δτ        # scratch  
-
-        mul!(Fscratch, grid.rfftplan, uflux) # \hat{u*Δτ} 
-        @. FNLτ +=   - im * grid.kr * Fscratch
-        mul!(Fscratch, grid.rfftplan, vflux) # \hat{v*Δτ}
-        @. FNLτ +=   - im * grid.kl * Fscratch
+   
+        mul!(vars.Fscratch, grid.rfftplan, @. -∂yf * Δτ) # \hat{u*Δτ} 
+        @. FNLτ +=   - im * grid.kr * vars.Fscratch
+        mul!(vars.Fscratch, grid.rfftplan, @. ∂xf * Δτ) # \hat{v*Δτ}
+        @. FNLτ +=   - im * grid.kl * vars.Fscratch
 
         # For τ-equation (baroclinic streamfunction) -J(ψ,τ/λ^2)
+        Δτ = nothing
+        Δψ = nothing
 
-        @. uflux = -∂yf * τ     # scratch   
-        @. vflux =  ∂xf * τ     # scratch  
-
-        mul!(Fscratch, grid.rfftplan, uflux) # \hat{u*τ} 
-        @. FNLτ +=   im * grid.kr * Fscratch / params.λ^2
-        mul!(Fscratch, grid.rfftplan, vflux) # \hat{v*τ}
-        @. FNLτ +=   im * grid.kl * Fscratch / params.λ^2
+        mul!(vars.Fscratch, grid.rfftplan, @. -∂yf * vars.scratch) # \hat{u*τ} 
+        @. FNLτ +=   im * grid.kr * vars.Fscratch / params.λ^2
+        mul!(vars.Fscratch, grid.rfftplan, @. ∂xf * vars.scratch) # \hat{v*τ}
+        @. FNLτ +=   im * grid.kl * vars.Fscratch / params.λ^2
           
         # add quadratic drag 
         if params.friction_type == 20
@@ -314,34 +305,29 @@ module Equation
                 # quadratic drag on ψ2 (bottom layer) only ψ2 = ψ - τ
                 @. ∂xψ2 +=  ∂xf
                 @. ∂yψ2 +=  ∂yf
-                @devzeros Dev Complex{T} (grid.nkr, grid.nl) F∇ψ2∂xψ2 
-                @devzeros Dev Complex{T} (grid.nkr, grid.nl) F∇ψ2∂yψ2
-                mul!(F∇ψ2∂xψ2, grid.rfftplan, @. (sqrt( ∂xψ2^2 + ∂yψ2^2 ) * ∂xψ2))
-                mul!(F∇ψ2∂yψ2, grid.rfftplan, @. (sqrt( ∂xψ2^2 + ∂yψ2^2 ) * ∂yψ2))  
-                @. vars.Ffrictionquad = - params.μ*(im * grid.kr * F∇ψ2∂xψ2 + im * grid.l * F∇ψ2∂yψ2)
+                #@devzeros Dev Complex{T} (grid.nkr, grid.nl) F∇ψ2∂xψ2 
+                #@devzeros Dev Complex{T} (grid.nkr, grid.nl) F∇ψ2∂yψ2
+                mul!(vars.Fscratch, grid.rfftplan, @. (sqrt( ∂xψ2^2 + ∂yψ2^2 ) * ∂xψ2))
+                @. vars.Ffrictionquad = - params.μ* im * grid.kr * vars.Fscratch
+                mul!(vars.Fscratch, grid.rfftplan, @. (sqrt( ∂xψ2^2 + ∂yψ2^2 ) * ∂yψ2))  
+                @. vars.Ffrictionquad = - params.μ* im * grid.l * vars.Fscratch
                 
                 @. FNLψ += vars.Ffrictionquad/2
                 @. FNLτ -= vars.Ffrictionquad/2
 
             else # drag only on ψ-equation
-                @devzeros Dev Complex{T} (grid.nkr, grid.nl) F∇ψ∂xψ 
-                @devzeros Dev Complex{T} (grid.nkr, grid.nl) F∇ψ∂yψ
-
-                mul!(F∇ψ∂xψ, grid.rfftplan, @. (sqrt( ∂xψ^2 + ∂yψ^2 ) * ∂xψ))
-                mul!(F∇ψ∂yψ, grid.rfftplan, @. (sqrt( ∂xψ^2 + ∂yψ^2 ) * ∂yψ))  
-        
-                @. vars.Ffrictionquad =  - params.μ*(im * grid.kr * F∇ψ∂xψ + im * grid.l * F∇ψ∂yψ)
+            
+                mul!(vars.Fscratch, grid.rfftplan, @. (sqrt( ∂xψ^2 + ∂yψ^2 ) * ∂xψ))
+                @. vars.Ffrictionquad =  - params.μ * im * grid.kr * vars.Fscratch
+                mul!(vars.Fscratch, grid.rfftplan, @. (sqrt( ∂xψ^2 + ∂yψ^2 ) * ∂yψ))  
+                @. vars.Ffrictionquad =  - params.μ* im * grid.l * vars.Fscratch
                 @. FNLψ += vars.Ffrictionquad/2
 
             end
         end
         
         # add forcing
-        if params.add_wn
-            # TODO
-            @. FNLτ += vars.Fh/sqrt(vars.substep)
-            @. FNLψ += vars.Fh/sqrt(vars.substep)
-        end
+        #TODO
        
         @. FNLψ *= -grid.invKrsq
         @. FNLτ *= - 1 ./(grid.Krsq + 1/params.λ^2)
@@ -371,8 +357,8 @@ module Equation
         @devzeros Dev Complex{T} (grid.nkr, grid.nl) FNLψf # initialize ponderated non-linear term
         @devzeros Dev Complex{T} (grid.nkr, grid.nl) FNLτf # initialize ponderated non-linear term
         
-        vars.Fψ0 = deepcopy(vars.Fψ) # copy solution at current timestep
-        vars.Fτ0 = deepcopy(vars.Fτ) # copy solution at current timestep
+        Fψ0 = deepcopy(vars.Fψ) # copy solution at current timestep
+        Fτ0 = deepcopy(vars.Fτ) # copy solution at current timestep
        
         # weights and coefficients for classical explicit rk4 method
         order = [0.5 0.5 1]
@@ -422,6 +408,49 @@ module Equation
 
     end
 
+    """ RK2 with exact integration of the linear terms
+
+    """
+
+    function rk2_timestepper!(vars :: Vars , params :: Params, Lψψ :: AbstractArray, Lψτ :: AbstractArray,
+        Lτψ ::AbstractArray, grid, dt :: AbstractFloat)
+        """
+            rk2 timestepper with exact integration of the linear terms
+            Following valadao et al. 2025
+
+        """
+        
+        Fψ0 = deepcopy(vars.Fψ) # copy solution at current timestep
+        Fτ0 = deepcopy(vars.Fτ) 
+        FNLψ, FNLτ = compute_NL(vars, params, vars.Fψ, vars.Fτ, grid)
+       
+        # first step
+        @. vars.Fψ = exp(Lψψ*dt/2)*(Fψ0 + (dt/2)*FNLψ) + exp(Lψτ*dt/2)*(Fτ0 + (dt/2)*FNLτ)
+        @. vars.Fτ = exp(Lψψ*dt/2)*(Fτ0 + (dt/2)*FNLτ) + exp(Lτψ*dt/2)*(Fτ + (dt/2)*FNLτ)
+
+        FNLψ = nothing
+        FNLτ = nothing
+        # dealiase
+        params.deal ? (@. vars.Fψ *= params.mask) : nothing
+        params.deal ? (@. vars.Fτ *= params.mask) : nothing
+
+        # second step
+        FNLψ, FNLτ = compute_NL(vars, vars.Fψ, vars.Fτ, params, grid)
+        @. vars.Fψ =  exp(Lψψ*dt) * Fψ0 + exp(Lψτ*dt) * Fτ0 + exp(Lψψ*dt/2)*dt*FNLψ + exp(Lψτ*dt/2)*dt*FNLτ
+        @. vars.Fτ =  exp(Lψψ*dt) * Fτ0 + exp(Lτψ*dt) * Fψ0 + exp(Lψψ*dt/2)*dt*FNLτ + exp(Lτψ*dt/2)*dt*FNLψ     
+        # dealiase
+        params.deal ? (@. vars.Fψ *= params.mask) : nothing
+        params.deal ? (@. vars.Fτ *= params.mask) : nothing
+        
+        FNLψ = nothing
+        FNLτ = nothing
+        
+        Fψ0 = nothing
+        Fτ0 = nothing
+    return
+    end
+
+
 
     """ step_forward!(vars :: Vars, params :: Params, L :: AbstractArray, Lτ :: Union{Nothing, AbstractArray}, timestepper :: string, grid, dt)
 
@@ -429,22 +458,21 @@ module Equation
 
     """
 
-    function step_forward!(vars :: Vars, params :: Params, grid, dt :: AbstractFloat)
+    function step_forward!(vars :: Vars, params :: Params, Lψψ ::AbstractArray, Lψτ ::AbstractArray, Lτψ::AbstractArray, grid, dt :: AbstractFloat)
         # update the forcing if white-noise-in-time
         if params.add_wn
             vars.Fh = calcF!(vars, params, grid, dt)
         end
         # update solution
         if params.timestepper == 10
-            rk4_imex_timestepper!(vars, params, grid, dt) 
+            rk2_timestepper!(vars, params, Lψψ, Lψτ, Lτψ, grid, dt)
         end
         if params.timestepper == 20
             println("Explicit rk4 not available : source has yet to be written")
             exit()
         end
         if params.timestepper == 30
-            println("ETDrk4 not available : source has yet to be written")
-            exit()
+            println("IMEXrk4 adoc, not available")
         end
         # CFL criteria for next timestep 
         KE, dt = update_timestep(vars, params, grid, dt)
@@ -494,7 +522,7 @@ module Equation
     end
 
 
-    function run_simulation!(vars :: Vars, params :: Params, grid, Nfield :: Int, 
+    function run_simulation!(vars :: Vars, params :: Params, Lψψ ::AbstractArray, Lψτ ::AbstractArray, Lτψ::AbstractArray, grid, Nfield :: Int, 
          Nstep :: Int, NsaveFlowfield :: Int, Nfig :: Int, NsaveEc :: Int, NSpectrum :: Int, dt, path_to_run)
         
         if params.friction_type == 10
@@ -510,7 +538,7 @@ module Equation
         counterEc = 0
         countSp = 0
         for ii in 1:Nstep
-            vars, KE, dt = step_forward!(vars, params, grid, dt) 
+            vars, KE, dt = step_forward!(vars, params, Lψψ, Lψτ, Lτψ, grid, dt) 
             counterEc+=1
             
             if counterEc == NsaveEc
